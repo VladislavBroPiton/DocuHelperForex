@@ -7,7 +7,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import asyncpg
-from config import BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL
+from config import BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, COHERE_API_KEY
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,21 +17,25 @@ dp = Dispatcher()
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
 
-EMBEDDING_API_URL = "https://api.lightweightembeddings.com/v1/embeddings"
-EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+COHERE_URL = "https://api.cohere.ai/v1/embed"
 
 async def get_embedding(text: str) -> list:
+    headers = {
+        "Authorization": f"Bearer {COHERE_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "texts": [text],
+        "model": "embed-multilingual-v3.0",
+        "input_type": "search_query"   # для поиска
+    }
     async with aiohttp.ClientSession() as session:
-        payload = {
-            "model": EMBEDDING_MODEL,
-            "input": text
-        }
-        async with session.post(EMBEDDING_API_URL, json=payload) as resp:
+        async with session.post(COHERE_URL, headers=headers, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                raise Exception(f"Embedding API error: {resp.status} - {error_text}")
+                raise Exception(f"Cohere API error: {resp.status} - {error_text}")
             data = await resp.json()
-            return data["data"][0]["embedding"]
+            return data["embeddings"][0]
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
     if not context_chunks:
@@ -89,7 +93,7 @@ async def handle_message(message: types.Message):
         logging.error(f"Ошибка в handle_message: {e}")
         await message.answer("Извините, произошла внутренняя ошибка.")
 
-# --- Вебхук (без изменений) ---
+# --- Вебхук ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
