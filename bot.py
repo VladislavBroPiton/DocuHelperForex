@@ -17,7 +17,7 @@ dp = Dispatcher()
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
 
-HF_EMBEDDING_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+HF_EMBEDDING_URL = "https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 async def get_embedding(text: str) -> list:
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
