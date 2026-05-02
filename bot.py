@@ -3,12 +3,11 @@ import logging
 import os
 from aiohttp import web
 import openai
+import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from sentence_transformers import SentenceTransformer
 import asyncpg
-from config import (BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL,
-                    OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL)
+from config import BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, HF_TOKEN
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,10 +17,17 @@ dp = Dispatcher()
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
 
-embedding_model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+HF_EMBEDDING_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 async def get_embedding(text: str) -> list:
-    return embedding_model.encode(text).tolist()
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(HF_EMBEDDING_URL, headers=headers, json={"inputs": text}) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise Exception(f"HF API error: {resp.status} - {error_text}")
+            embedding = await resp.json()
+            return embedding
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
     if not context_chunks:
@@ -59,7 +65,6 @@ async def handle_message(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         query_embedding = await get_embedding(query)
-        # Преобразуем список в строку для PostgreSQL
         query_emb_str = str(query_embedding)
         conn = await asyncpg.connect(DATABASE_URL)
         rows = await conn.fetch("""
@@ -80,7 +85,7 @@ async def handle_message(message: types.Message):
         logging.error(f"Ошибка в handle_message: {e}")
         await message.answer("Извините, произошла внутренняя ошибка.")
 
-# --- Вебхук ---
+# --- Вебхук (без изменений) ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
