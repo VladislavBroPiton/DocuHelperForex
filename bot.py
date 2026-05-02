@@ -14,13 +14,16 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Настройка OpenRouter (используем ключ из config)
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
+
+# Модель для генерации (можно оставить из config или переопределить)
+LLM_MODEL = OPENROUTER_MODEL  # например "deepseek/deepseek-r1:free"
 
 COHERE_URL = "https://api.cohere.ai/v1/embed"
 
 async def get_embedding(text: str) -> list:
-    """Получает векторное представление текста через Cohere API."""
     headers = {
         "Authorization": f"Bearer {COHERE_API_KEY}",
         "Content-Type": "application/json"
@@ -28,7 +31,7 @@ async def get_embedding(text: str) -> list:
     payload = {
         "texts": [text],
         "model": "embed-multilingual-v3.0",
-        "input_type": "search_query"  # для поисковых запросов
+        "input_type": "search_query"
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(COHERE_URL, headers=headers, json=payload) as resp:
@@ -39,9 +42,10 @@ async def get_embedding(text: str) -> list:
             return data["embeddings"][0]
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
-    """Формирует ответ, используя LLM (OpenRouter) и контекст из базы знаний."""
+    """Пытается сгенерировать ответ через LLM, при ошибке возвращает первый чанк."""
     if not context_chunks:
         return "Извините, я не нашёл информацию по вашему вопросу."
+    
     context = "\n\n---\n\n".join([chunk[0] for chunk in context_chunks])
     messages = [
         {"role": "system", "content": "Ты — эксперт по трейдингу Forex. Отвечай, используя только контекст. Если ответа нет в контексте, скажи: 'Не знаю, в документации нет'."},
@@ -49,22 +53,25 @@ async def ask_llm_with_context(query: str, context_chunks: list) -> str:
     ]
     try:
         response = await openai.ChatCompletion.acreate(
-            model=OPENROUTER_MODEL,
+            model=LLM_MODEL,
             messages=messages,
             temperature=0.2,
-            max_tokens=300
+            max_tokens=500
         )
         answer = response.choices[0].message.content.strip()
         source = context_chunks[0][1]
         return f"{answer}\n\n📚 *Источник:* {source}"
     except Exception as e:
         logging.error(f"LLM error: {e}")
-        return "Ошибка при генерации ответа. Попробуйте позже."
+        # Fallback: вернуть самый релевантный кусок текста
+        fallback_text = context_chunks[0][0][:600]
+        return f"🔍 *Найдено в базе знаний:*\n\n{fallback_text}\n\n📚 *Источник:* {context_chunks[0][1]}"
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
-        "Привет! Я AI-помощник по трейдингу Forex. Задавайте вопросы о трейдинге, и я постараюсь найти ответ в моей базе знаний."
+        "Привет! Я AI-помощник по трейдингу Forex. Задавайте вопросы, и я постараюсь найти ответ в моей базе знаний.\n\n"
+        "Примеры: «Что такое спред?», «Управление рисками», «пипс»"
     )
 
 @dp.message()
@@ -74,21 +81,14 @@ async def handle_message(message: types.Message):
         return
     await bot.send_chat_action(message.chat.id, "typing")
     try:
-        # 1. Получаем эмбеддинг вопроса
         query_embedding = await get_embedding(query)
         query_emb_str = str(query_embedding)
 
-        # 2. Динамически выбираем порог схожести
-        #    Если запрос очень короткий (1–2 слова), снижаем порог, чтобы находить даже отдалённые совпадения
+        # Динамический порог для коротких запросов
         word_count = len(query.split())
-        if word_count <= 2:
-            threshold = 0.35   # низкий порог для коротких запросов (например, "форекс")
-        else:
-            threshold = SIMILARITY_THRESHOLD   # обычный порог из config.py
+        threshold = 0.35 if word_count <= 2 else SIMILARITY_THRESHOLD
 
         conn = await asyncpg.connect(DATABASE_URL)
-
-        # 3. Поиск похожих чанков
         rows = await conn.fetch("""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
             FROM documents_chunks
@@ -97,11 +97,8 @@ async def handle_message(message: types.Message):
             LIMIT $3
         """, query_emb_str, threshold, TOP_K)
 
-        similar = [(row["chunk_text"], row["source"], row["similarity"]) for row in rows]
-
-        # Дополнительно: если ничего не нашлось, но запрос короткий - повторить с ещё более низким порогом?
-        if not similar and word_count <= 2:
-            # Пробуем ещё раз с порогом 0.2
+        # Повторный поиск с более низким порогом, если ничего не нашли
+        if not rows and word_count <= 2:
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
@@ -109,23 +106,22 @@ async def handle_message(message: types.Message):
                 ORDER BY similarity DESC
                 LIMIT $3
             """, query_emb_str, TOP_K)
-            similar = [(row["chunk_text"], row["source"], row["similarity"]) for row in rows]
 
+        similar = [(row["chunk_text"], row["source"], row["similarity"]) for row in rows]
         await conn.close()
 
         if not similar:
-            await message.answer("По вашему вопросу ничего не найдено.")
+            await message.answer("По вашему вопросу ничего не найдено. Попробуйте переформулировать.")
             return
 
-        # 4. Генерация ответа через LLM
         answer = await ask_llm_with_context(query, similar)
         await message.answer(answer, parse_mode="Markdown")
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
-        await message.answer("Извините, произошла внутренняя ошибка.")
+        await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
 
-# --- Вебхук (без изменений) ---
+# --- Вебхук ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
