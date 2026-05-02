@@ -7,7 +7,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import asyncpg
-from config import BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, HF_TOKEN
+from config import BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,7 +32,6 @@ async def get_embedding(text: str) -> list:
                 raise Exception(f"Embedding API error: {resp.status} - {error_text}")
             data = await resp.json()
             return data["data"][0]["embedding"]
-            return embedding
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
     if not context_chunks:
