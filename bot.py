@@ -7,18 +7,23 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import asyncpg
-from config import BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, COHERE_API_KEY
+from config import (
+    BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_BASE_URL,
+    OPENROUTER_MODEL, SIMILARITY_THRESHOLD, TOP_K,
+    DATABASE_URL, COHERE_API_KEY
+)
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- ВАЖНО: Указываем работающую бесплатную модель ---
-# Используем модель из config, если она прописана, или подставляем запасную
-LLM_MODEL = OPENROUTER_MODEL if OPENROUTER_MODEL else "google/gemini-2.0-flash-exp:free"
+LLM_MODEL = OPENROUTER_MODEL
 logging.info(f"Using LLM model: {LLM_MODEL}")
 
+# Константы для Cohere
 COHERE_URL = "https://api.cohere.ai/v1/embed"
 
 async def get_embedding(text: str) -> list:
@@ -40,7 +45,6 @@ async def get_embedding(text: str) -> list:
                 raise Exception(f"Cohere API error: {resp.status}")
             data = await resp.json()
             return data["embeddings"][0]
-
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
     """Генерация ответа через OpenRouter с запасным вариантом."""
@@ -76,7 +80,7 @@ async def ask_llm_with_context(query: str, context_chunks: list) -> str:
                 answer = data["choices"][0]["message"]["content"].strip()
                 source = context_chunks[0][1]
 
-                # --- УНИВЕРСАЛЬНОЕ ЭКРАНИРОВАНИЕ ДЛЯ MarkdownV2 ---
+                # --- ЭКРАНИРОВАНИЕ ДЛЯ MarkdownV2 ---
                 escape_chars = r'_*[]()~`>#+-=|{}.!'
                 answer_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', answer)
                 source_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', source)
@@ -87,10 +91,10 @@ async def ask_llm_with_context(query: str, context_chunks: list) -> str:
         logging.error(f"LLM error: {e}")
         # ЗАПАСНОЙ ВАРИАНТ: возвращаем найденный фрагмент текста
         fallback_text = context_chunks[0][0][:600]
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
         fallback_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', fallback_text)
         source_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', context_chunks[0][1])
         return f"🔍 *Найдено в базе знаний:*\n\n{fallback_escaped}\n\n📚 *Источник:* {source_escaped}"
-
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -98,7 +102,6 @@ async def start_cmd(message: types.Message):
         "Привет! Я AI-помощник по трейдингу Forex. Задавайте вопросы, и я постараюсь найти ответ в моей базе знаний.\n\n"
         "Примеры: «Что такое спред?», «Управление рисками», «пипс»"
     )
-
 
 @dp.message()
 async def handle_message(message: types.Message):
@@ -146,20 +149,17 @@ async def handle_message(message: types.Message):
         logging.error(f"Ошибка в handle_message: {e}")
         await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
 
-
-# --- Вебхук (без изменений) ---
+# --- Вебхук ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
     return web.Response()
-
 
 async def on_startup():
     await bot.delete_webhook(drop_pending_updates=True)
     webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/webhook"
     await bot.set_webhook(webhook_url)
     logging.info(f"Webhook set to {webhook_url}")
-
 
 async def main():
     app = web.Application()
@@ -172,7 +172,6 @@ async def main():
     await site.start()
     await on_startup()
     await asyncio.Event().wait()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
