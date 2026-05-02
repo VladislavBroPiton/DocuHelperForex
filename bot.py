@@ -17,13 +17,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
-# --- Функция для экранирования спецсимволов MarkdownV2 ---
 def escape_md(text: str) -> str:
-    """Экранирует специальные символы Telegram MarkdownV2."""
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# --- Клавиатура ---
 kb_buttons = [
     [KeyboardButton(text="📈 Что такое спред?"), KeyboardButton(text="⚖️ Правило 1%")],
     [KeyboardButton(text="📊 Торговые стратегии"), KeyboardButton(text="🛡️ Как управлять рисками?")],
@@ -53,7 +50,6 @@ async def get_embedding(text: str) -> list:
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    # Отправляем приветствие без Markdown, чтобы избежать проблем с экранированием
     await message.answer(
         "🤖 Привет! Я бот-помощник по трейдингу Forex.\n"
         "Задайте вопрос в свободной форме или выберите один из вариантов ниже:",
@@ -68,18 +64,27 @@ async def handle_message(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         query_embedding = await get_embedding(query)
-        query_emb_str = str(query_embedding)
+        query_emb_str = str(query_embedding)  # строка вида "[0.1, 0.2, ...]"
+
+        word_count = len(query.split())
+        # Убеждаемся, что порог - число с плавающей точкой
+        if word_count <= 2:
+            threshold = 0.35
+        else:
+            threshold = float(SIMILARITY_THRESHOLD)
 
         conn = await asyncpg.connect(DATABASE_URL)
+
         rows = await conn.fetch("""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
             FROM documents_chunks
             WHERE 1 - (embedding <=> $1::vector) > $2
             ORDER BY similarity DESC
             LIMIT $3
-        """, query_emb_str, SIMILARITY_THRESHOLD, TOP_K)
+        """, query_emb_str, threshold, TOP_K)
 
         if not rows:
+            # Повторный поиск с низким порогом
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
@@ -96,7 +101,6 @@ async def handle_message(message: types.Message):
             await db.log_query(message.from_user.id, message.from_user.username, query, answer)
             return
 
-        # Формируем ответ с экранированием MarkdownV2
         answer_parts = []
         for i, row in enumerate(rows, 1):
             text = escape_md(row["chunk_text"])
@@ -105,8 +109,6 @@ async def handle_message(message: types.Message):
         answer = "\n\n".join(answer_parts)
 
         await message.answer(answer, parse_mode="MarkdownV2")
-
-        # Логируем вопрос и ответ
         await db.log_query(message.from_user.id, message.from_user.username, query, answer)
 
     except Exception as e:
