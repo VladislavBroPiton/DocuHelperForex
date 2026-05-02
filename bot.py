@@ -6,13 +6,24 @@ from aiohttp import web
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import asyncpg
 from config import BOT_TOKEN, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, COHERE_API_KEY
+from database import Database
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+db = Database()
+
+# --- КЛАВИАТУРА ---
+kb_buttons = [
+    [KeyboardButton(text="📈 Что такое спред?"), KeyboardButton(text="⚖️ Правило 1%")],
+    [KeyboardButton(text="📊 Торговые стратегии"), KeyboardButton(text="🛡️ Как управлять рисками?")],
+    [KeyboardButton(text="📚 Что такое форекс?"), KeyboardButton(text="🔧 Основные термины")]
+]
+start_keyboard = ReplyKeyboardMarkup(keyboard=kb_buttons, resize_keyboard=True)
 
 COHERE_URL = "https://api.cohere.ai/v1/embed"
 
@@ -30,16 +41,17 @@ async def get_embedding(text: str) -> list:
         async with session.post(COHERE_URL, headers=headers, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                logging.error(f"Cohere API error: {resp.status} - {error_text}")
-                raise Exception(f"Cohere API error: {resp.status}")
+                raise Exception(f"Cohere API error: {resp.status} - {error_text}")
             data = await resp.json()
             return data["embeddings"][0]
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
-        "Привет! Я AI-помощник по трейдингу Forex. Я ищу ответы в своей базе знаний и показываю самые подходящие фрагменты.\n"
-        "Задайте вопрос, например: «Что такое спред?» или «пипс»."
+        "🤖 *Привет! Я бот-помощник по трейдингу Forex.*\n"
+        "Задайте вопрос в свободной форме или выберите один из вариантов ниже:",
+        parse_mode="MarkdownV2",
+        reply_markup=start_keyboard
     )
 
 @dp.message()
@@ -52,7 +64,6 @@ async def handle_message(message: types.Message):
         query_embedding = await get_embedding(query)
         query_emb_str = str(query_embedding)
 
-        # --- ПОИСК С ОСНОВНЫМ ПОРОГОМ ---
         conn = await asyncpg.connect(DATABASE_URL)
         rows = await conn.fetch("""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
@@ -62,9 +73,7 @@ async def handle_message(message: types.Message):
             LIMIT $3
         """, query_emb_str, SIMILARITY_THRESHOLD, TOP_K)
 
-        # --- ЕСЛИ НИЧЕГО НЕ НАШЛО, ПРОБУЕМ С НИЗКИМ ПОРОГОМ (0.3) ---
         if not rows:
-            logging.info(f"Ничего не найдено с порогом {SIMILARITY_THRESHOLD}, пробуем порог 0.3")
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
@@ -76,10 +85,12 @@ async def handle_message(message: types.Message):
         await conn.close()
 
         if not rows:
-            await message.answer("По вашему вопросу ничего не найдено. Попробуйте переформулировать.")
+            answer = "По вашему вопросу ничего не найдено. Попробуйте переформулировать."
+            await message.answer(answer)
+            await db.log_query(message.from_user.id, message.from_user.username, query, answer)
             return
 
-        # --- ФОРМИРОВАНИЕ ОТВЕТА ---
+        # Формируем ответ
         answer_parts = []
         for i, row in enumerate(rows, 1):
             text = row["chunk_text"]
@@ -92,9 +103,13 @@ async def handle_message(message: types.Message):
         answer = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', answer)
         await message.answer(answer, parse_mode="MarkdownV2")
 
+        # Логируем вопрос и ответ
+        await db.log_query(message.from_user.id, message.from_user.username, query, answer)
+
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
         await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
+        await db.log_query(message.from_user.id, message.from_user.username, query, "ERROR: " + str(e))
 
 # --- Вебхук ---
 async def webhook_handler(request):
@@ -103,6 +118,8 @@ async def webhook_handler(request):
     return web.Response()
 
 async def on_startup():
+    await db.connect()
+    await db.create_tables()  # убедитесь, что create_tables создаёт и queries_log
     await bot.delete_webhook(drop_pending_updates=True)
     webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/webhook"
     await bot.set_webhook(webhook_url)
