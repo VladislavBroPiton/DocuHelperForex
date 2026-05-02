@@ -17,7 +17,13 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
-# --- КЛАВИАТУРА ---
+# --- Функция для экранирования спецсимволов MarkdownV2 ---
+def escape_md(text: str) -> str:
+    """Экранирует специальные символы Telegram MarkdownV2."""
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
+# --- Клавиатура ---
 kb_buttons = [
     [KeyboardButton(text="📈 Что такое спред?"), KeyboardButton(text="⚖️ Правило 1%")],
     [KeyboardButton(text="📊 Торговые стратегии"), KeyboardButton(text="🛡️ Как управлять рисками?")],
@@ -47,10 +53,10 @@ async def get_embedding(text: str) -> list:
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
+    # Отправляем приветствие без Markdown, чтобы избежать проблем с экранированием
     await message.answer(
-        "🤖 *Привет! Я бот-помощник по трейдингу Forex.*\n"
+        "🤖 Привет! Я бот-помощник по трейдингу Forex.\n"
         "Задайте вопрос в свободной форме или выберите один из вариантов ниже:",
-        parse_mode="MarkdownV2",
         reply_markup=start_keyboard
     )
 
@@ -90,17 +96,14 @@ async def handle_message(message: types.Message):
             await db.log_query(message.from_user.id, message.from_user.username, query, answer)
             return
 
-        # Формируем ответ
+        # Формируем ответ с экранированием MarkdownV2
         answer_parts = []
         for i, row in enumerate(rows, 1):
-            text = row["chunk_text"]
-            source = row["source"]
+            text = escape_md(row["chunk_text"])
+            source = escape_md(row["source"])
             answer_parts.append(f"*Результат {i}:*\n{text}\n📚 *Источник:* {source}")
         answer = "\n\n".join(answer_parts)
 
-        # Экранирование спецсимволов для MarkdownV2
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
-        answer = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', answer)
         await message.answer(answer, parse_mode="MarkdownV2")
 
         # Логируем вопрос и ответ
@@ -108,8 +111,9 @@ async def handle_message(message: types.Message):
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
-        await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
-        await db.log_query(message.from_user.id, message.from_user.username, query, "ERROR: " + str(e))
+        error_msg = "Извините, произошла внутренняя ошибка. Попробуйте позже."
+        await message.answer(error_msg)
+        await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
 # --- Вебхук ---
 async def webhook_handler(request):
@@ -119,7 +123,7 @@ async def webhook_handler(request):
 
 async def on_startup():
     await db.connect()
-    await db.create_tables()  # убедитесь, что create_tables создаёт и queries_log
+    await db.create_tables()
     await bot.delete_webhook(drop_pending_updates=True)
     webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/webhook"
     await bot.set_webhook(webhook_url)
