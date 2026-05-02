@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+from urllib.parse import quote, unquote
 from aiohttp import web
 import aiohttp
 from aiogram import Bot, Dispatcher, types
@@ -9,7 +10,6 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 import asyncpg
-from functools import lru_cache
 from config import BOT_TOKEN, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, COHERE_API_KEY, ADMIN_ID
 from database import Database
 
@@ -106,7 +106,6 @@ async def start_cmd(message: types.Message):
 
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
-    # Проверка, что отправитель — администратор
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ У вас нет доступа к этой команде.")
         return
@@ -173,37 +172,36 @@ async def handle_message(message: types.Message):
         footer = f"\n\n📚 *Источник:* `{source}`"
         full_message = header + escape_md(final_answer) + footer
 
-        # Inline-кнопки обратной связи
+        # Кодируем вопрос для callback_data (ограничим длину 50 символов)
+        encoded_query = quote(query[:50], safe='')
         inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👍 Полезно", callback_data=f"feedback_useful:{query}"),
-             InlineKeyboardButton(text="👎 Не полезно", callback_data=f"feedback_notuseful:{query}")]
+            [InlineKeyboardButton(text="👍 Полезно", callback_data=f"feedback_useful:{encoded_query}"),
+             InlineKeyboardButton(text="👎 Не полезно", callback_data=f"feedback_notuseful:{encoded_query}")]
         ])
 
         await message.answer(full_message, parse_mode="MarkdownV2", reply_markup=inline_kb)
 
-        # Логируем вопрос и ответ (без оценки)
         await db.log_query(message.from_user.id, message.from_user.username, query, final_answer)
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
-        await message.answer("⚠️ *Извините, произошла внутренняя ошибка.* Попробуйте позже.", parse_mode="MarkdownV2")
+        error_text = escape_md("⚠️ *Извините, произошла внутренняя ошибка.* Попробуйте позже.")
+        await message.answer(error_text, parse_mode="MarkdownV2")
         await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
 # ------------------- ОБРАБОТКА ОБРАТНОЙ СВЯЗИ -------------------
 @dp.callback_query(lambda c: c.data and c.data.startswith("feedback_"))
 async def handle_feedback(callback: types.CallbackQuery):
-    # Извлекаем тип и исходный вопрос
     parts = callback.data.split(":", 1)
     if len(parts) != 2:
         await callback.answer("Ошибка", show_alert=False)
         return
-    action, query_text = parts
+    action, encoded_query = parts
     rating = 1 if action == "feedback_useful" else -1
+    query_text = unquote(encoded_query)
 
-    # Сохраняем в БД
     await db.save_feedback(callback.from_user.id, query_text, rating)
 
-    # Убираем кнопки, чтобы пользователь не нажал повторно
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("Спасибо за обратную связь!", show_alert=False)
 
