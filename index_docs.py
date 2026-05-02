@@ -4,7 +4,7 @@ import asyncpg
 from config import DATABASE_URL, HF_TOKEN  # добавим HF_TOKEN в config
 
 # Бесплатный эндпоинт Hugging Face
-HF_EMBEDDING_URL = "https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+HF_EMBEDDING_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 async def get_embedding(text: str, headers: dict) -> list:
     async with aiohttp.ClientSession() as session:
