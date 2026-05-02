@@ -33,14 +33,14 @@ class Database:
                     created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
-            # Таблица для обратной связи
+            # Новая таблица для обратной связи
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS feedback (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
                     query_text TEXT,
                     answer_text TEXT,
-                    feedback_type BOOLEAN,  -- TRUE = полезно, FALSE = не полезно
+                    rating INTEGER,  -- 1 = полезно, 0 = не полезно
                     created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
@@ -52,42 +52,43 @@ class Database:
                 VALUES ($1, $2, $3, $4, NOW())
             """, user_id, username, query_text, answer_text)
 
-    async def save_feedback(self, user_id: int, query_text: str, answer_text: str, feedback_type: bool):
+    async def save_feedback(self, user_id: int, query_text: str, answer_text: str, rating: int):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO feedback (user_id, query_text, answer_text, feedback_type, created_at)
+                INSERT INTO feedback (user_id, query_text, answer_text, rating, created_at)
                 VALUES ($1, $2, $3, $4, NOW())
-            """, user_id, query_text, answer_text, feedback_type)
+            """, user_id, query_text, answer_text, rating)
 
-    async def get_stats_for_admin(self) -> dict:
+    async def get_stats(self) -> dict:
         async with self.pool.acquire() as conn:
-            # Общее количество вопросов
-            total_queries = await conn.fetchval("SELECT COUNT(*) FROM queries_log;")
-            # Вопросы за последние 24 часа
-            today_queries = await conn.fetchval("""
-                SELECT COUNT(*) FROM queries_log
-                WHERE created_at > NOW() - INTERVAL '1 day';
-            """)
-            # Уникальные пользователи за всё время
-            unique_users = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM queries_log;")
-            # Топ-5 запросов (без учёта регистра, исключая слишком короткие)
+            total_queries = await conn.fetchval("SELECT COUNT(*) FROM queries_log")
+            today = await conn.fetchval("SELECT COUNT(*) FROM queries_log WHERE DATE(created_at) = CURRENT_DATE")
+            week = await conn.fetchval("SELECT COUNT(*) FROM queries_log WHERE created_at > NOW() - INTERVAL '7 days'")
+            unique_users = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM queries_log")
+            # Топ-5 запросов
             top_queries = await conn.fetch("""
-                SELECT lower(query_text) as q, COUNT(*) as cnt
+                SELECT query_text, COUNT(*) as cnt
                 FROM queries_log
-                WHERE LENGTH(query_text) > 3
-                GROUP BY q
+                GROUP BY query_text
                 ORDER BY cnt DESC
-                LIMIT 5;
+                LIMIT 5
             """)
-            # Количество полезных и неполезных отзывов
-            positive = await conn.fetchval("SELECT COUNT(*) FROM feedback WHERE feedback_type = TRUE;")
-            negative = await conn.fetchval("SELECT COUNT(*) FROM feedback WHERE feedback_type = FALSE;")
-            
+            top_list = [(row["query_text"], row["cnt"]) for row in top_queries]
+
+            # Обратная связь
+            total_feedback = await conn.fetchval("SELECT COUNT(*) FROM feedback")
+            positive = await conn.fetchval("SELECT COUNT(*) FROM feedback WHERE rating = 1")
+            negative = total_feedback - positive if total_feedback else 0
+
             return {
                 "total_queries": total_queries,
-                "today_queries": today_queries,
+                "today_queries": today,
+                "week_queries": week,
                 "unique_users": unique_users,
-                "top_queries": [(row["q"], row["cnt"]) for row in top_queries],
+                "top_queries": top_list,
+                "total_feedback": total_feedback,
                 "positive_feedback": positive,
                 "negative_feedback": negative,
             }
+
+    # Остальные методы (delete_all_chunks, insert_chunk, find_similar_chunks) если используются, оставьте как есть.
