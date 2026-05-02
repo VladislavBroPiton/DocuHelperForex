@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import re
-from urllib.parse import quote, unquote
 from aiohttp import web
 import aiohttp
 from aiogram import Bot, Dispatcher, types
@@ -24,8 +23,9 @@ def escape_md(text: str) -> str:
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# Кэш эмбеддингов
+# Кэш эмбеддингов и последних вопросов
 embedding_cache = {}
+last_user_query = {}
 
 async def get_embedding_cached(text: str) -> str:
     if text in embedding_cache:
@@ -128,6 +128,8 @@ async def handle_message(message: types.Message):
     query = message.text.strip()
     if not query:
         return
+    # Сохраняем вопрос пользователя для обратной связи
+    last_user_query[message.from_user.id] = query
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         query_emb_str = await get_embedding_cached(query)
@@ -172,11 +174,10 @@ async def handle_message(message: types.Message):
         footer = f"\n\n📚 *Источник:* `{source}`"
         full_message = header + escape_md(final_answer) + footer
 
-        # Кодируем вопрос для callback_data (ограничим длину 50 символов)
-        encoded_query = quote(query[:50], safe='')
+        # Inline-кнопки обратной связи (без текста вопроса в data)
         inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👍 Полезно", callback_data=f"feedback_useful:{encoded_query}"),
-             InlineKeyboardButton(text="👎 Не полезно", callback_data=f"feedback_notuseful:{encoded_query}")]
+            [InlineKeyboardButton(text="👍 Полезно", callback_data="feedback_useful"),
+             InlineKeyboardButton(text="👎 Не полезно", callback_data="feedback_notuseful")]
         ])
 
         await message.answer(full_message, parse_mode="MarkdownV2", reply_markup=inline_kb)
@@ -185,24 +186,28 @@ async def handle_message(message: types.Message):
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
-        error_text = escape_md("⚠️ *Извините, произошла внутренняя ошибка.* Попробуйте позже.")
-        await message.answer(error_text, parse_mode="MarkdownV2")
+        error_msg = escape_md("⚠️ Извините, произошла внутренняя ошибка. Попробуйте позже.")
+        await message.answer(error_msg, parse_mode="MarkdownV2")
         await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
 # ------------------- ОБРАБОТКА ОБРАТНОЙ СВЯЗИ -------------------
 @dp.callback_query(lambda c: c.data and c.data.startswith("feedback_"))
 async def handle_feedback(callback: types.CallbackQuery):
-    parts = callback.data.split(":", 1)
-    if len(parts) != 2:
-        await callback.answer("Ошибка", show_alert=False)
-        return
-    action, encoded_query = parts
+    action = callback.data
     rating = 1 if action == "feedback_useful" else -1
-    query_text = unquote(encoded_query)
-
-    await db.save_feedback(callback.from_user.id, query_text, rating)
-
-    await callback.message.edit_reply_markup(reply_markup=None)
+    user_id = callback.from_user.id
+    query_text = last_user_query.get(user_id, "")
+    if not query_text:
+        await callback.answer("Не удалось определить вопрос, но спасибо!", show_alert=False)
+        # Всё равно попробуем сохранить без вопроса (хотя бы оценку)
+        await db.save_feedback(user_id, "unknown", rating)
+    else:
+        await db.save_feedback(user_id, query_text, rating)
+    # Убираем кнопки
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     await callback.answer("Спасибо за обратную связь!", show_alert=False)
 
 # ------------------- ВЕБХУК -------------------
