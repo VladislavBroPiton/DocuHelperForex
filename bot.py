@@ -17,19 +17,21 @@ dp = Dispatcher()
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
 
-HF_EMBEDDING_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+HF_EMBEDDING_URL = "https://api.lightweightembeddings.com/v1/embeddings"
+HF_TOKEN = None  # или просто уберите проверку токена
 
 async def get_embedding(text: str) -> list:
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     async with aiohttp.ClientSession() as session:
-        async with session.post(HF_EMBEDDING_URL, headers=headers, json={"inputs": text}) as resp:
+        payload = {
+            "model": "paraphrase-multilingual-MiniLM-L12-v2",
+            "input": text
+        }
+        async with session.post("https://api.lightweightembeddings.com/v1/embeddings", json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                raise Exception(f"HF API error: {resp.status} - {error_text}")
-            embedding = await resp.json()
-            # Ответ HF — список списков [[...]]? Проверим, обычно возвращает list
-            if isinstance(embedding, list) and len(embedding) == 1 and isinstance(embedding[0], list):
-                return embedding[0]  # извлекаем вектор
+                raise Exception(f"Embedding API error: {resp.status} - {error_text}")
+            data = await resp.json()
+            embedding = data["data"][0]["embedding"]
             return embedding
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
