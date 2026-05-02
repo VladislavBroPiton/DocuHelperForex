@@ -3,11 +3,9 @@ from sentence_transformers import SentenceTransformer
 import asyncpg
 from config import DATABASE_URL
 
-# Загружаем бесплатную локальную модель (она скачается один раз, ~120 МБ)
 model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
 async def get_embedding(text: str) -> list:
-    # Модель возвращает вектор (список чисел)
     return model.encode(text).tolist()
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
@@ -21,9 +19,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
 
 async def main():
     conn = await asyncpg.connect(DATABASE_URL)
-    # Включаем расширение vector (если ещё не включено)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-    # Создаём таблицу, если её нет (размерность вектора 384)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS documents_chunks (
             id SERIAL PRIMARY KEY,
@@ -32,7 +28,6 @@ async def main():
             source VARCHAR(255)
         );
     """)
-    # Очищаем старые данные
     await conn.execute("TRUNCATE documents_chunks;")
 
     with open("forex_knowledge.txt", "r", encoding="utf-8") as f:
@@ -43,9 +38,11 @@ async def main():
 
     for i, chunk in enumerate(chunks):
         emb = await get_embedding(chunk)
+        # Превращаем список в строку для PostgreSQL
+        emb_str = str(emb)
         await conn.execute(
-            "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2, $3)",
-            chunk, emb, "forex_knowledge.txt"
+            "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2::vector, $3)",
+            chunk, emb_str, "forex_knowledge.txt"
         )
         print(f"Загружен {i+1}/{len(chunks)}")
 
