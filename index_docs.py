@@ -1,26 +1,29 @@
 import asyncio
 import aiohttp
 import asyncpg
-from config import DATABASE_URL
+import os
+from config import DATABASE_URL, COHERE_API_KEY
 
-# Бесплатный эндпоинт LightweightEmbeddings (без токена)
-EMBEDDING_API_URL = "https://api.lightweightembeddings.com/v1/embeddings"
-EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+COHERE_URL = "https://api.cohere.ai/v1/embed"
 
 async def get_embedding(text: str) -> list:
+    headers = {
+        "Authorization": f"Bearer {COHERE_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "texts": [text],
+        "model": "embed-multilingual-v3.0",
+        "input_type": "search_document"
+    }
     async with aiohttp.ClientSession() as session:
-        payload = {
-            "model": EMBEDDING_MODEL,
-            "input": text
-        }
-        async with session.post(EMBEDDING_API_URL, json=payload) as resp:
+        async with session.post(COHERE_URL, headers=headers, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                raise Exception(f"Embedding API error: {resp.status} - {error_text}")
+                raise Exception(f"Cohere API error: {resp.status} - {error_text}")
             data = await resp.json()
-            # Ответ LightweightEmbeddings: {"data": [{"embedding": [...]}]}
-            embedding = data["data"][0]["embedding"]
-            return embedding
+            # Возвращает список из одного вектора
+            return data["embeddings"][0]
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     words = text.split()
@@ -32,6 +35,8 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     return chunks
 
 async def main():
+    if not COHERE_API_KEY:
+        raise Exception("COHERE_API_KEY не задан")
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     await conn.execute("DROP TABLE IF EXISTS documents_chunks;")
@@ -39,7 +44,7 @@ async def main():
         CREATE TABLE documents_chunks (
             id SERIAL PRIMARY KEY,
             chunk_text TEXT NOT NULL,
-            embedding vector(384),
+            embedding vector(1024),
             source VARCHAR(255)
         );
     """)
