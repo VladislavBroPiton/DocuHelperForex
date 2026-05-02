@@ -17,28 +17,37 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
+# ---------- КЭШ ЭМБЕДДИНГОВ ----------
+embedding_cache = {}
+CACHE_MAX_SIZE = 100  # ограничим количество записей, чтобы не переполнить память
+
+def get_cached_embedding(text: str):
+    return embedding_cache.get(text)
+
+def set_cached_embedding(text: str, embedding: list):
+    if len(embedding_cache) >= CACHE_MAX_SIZE:
+        # удаляем первый (старейший) элемент
+        first_key = next(iter(embedding_cache))
+        del embedding_cache[first_key]
+    embedding_cache[text] = embedding
+
 def escape_md(text: str) -> str:
+    """Экранирует специальные символы Telegram MarkdownV2."""
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# -------------- НОВЫЕ ФУНКЦИИ ДЛЯ ВЫДЕЛЕНИЯ ПРЕДЛОЖЕНИЙ --------------
+# -------------- ФУНКЦИИ ДЛЯ ВЫДЕЛЕНИЯ ПРЕДЛОЖЕНИЙ --------------
 def split_sentences(text: str) -> list[str]:
-    """Разбивает текст на предложения по . ! ? (учитывает многоточие)"""
-    # Заменяем переносы строк на пробелы
     text = text.replace('\n', ' ')
-    # Регулярное выражение для разделения
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    # Удаляем пустые и слишком короткие (меньше 10 символов)
     sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
     return sentences
 
 def word_set(text: str) -> set:
-    """Возвращает множество слов в нижнем регистре, игнорируя знаки препинания."""
     words = re.findall(r'\b\w+\b', text.lower())
     return set(words)
 
 def score_sentence(query: str, sentence: str) -> float:
-    """Оценка схожести предложения с запросом (пересечение слов / длина запроса)"""
     query_words = word_set(query)
     sentence_words = word_set(sentence)
     if not query_words:
@@ -47,7 +56,6 @@ def score_sentence(query: str, sentence: str) -> float:
     return overlap / len(query_words)
 
 def get_best_sentence(query: str, sentences: list[str]) -> tuple[str, float]:
-    """Возвращает лучшее предложение и его оценку."""
     best = ""
     best_score = 0.0
     for sent in sentences:
@@ -57,8 +65,26 @@ def get_best_sentence(query: str, sentences: list[str]) -> tuple[str, float]:
             best = sent
     return best, best_score
 
-# ----------------------------------------------------------------
+# -------------- ФОРМАТИРОВАНИЕ ОТВЕТА --------------
+def format_answer(sentence: str, source: str) -> str:
+    """Оформляет ответ в красивом формате MarkdownV2."""
+    # Убираем лишние пробелы и переносы
+    sentence = sentence.strip()
+    # Если предложение содержит двоеточие, возможно это термин
+    # Но пока просто выделим жирным первое слово (если это не слишком длинное)
+    # Для простоты – добавим красивый заголовок
+    parts = sentence.split(':', 1)
+    if len(parts) > 1 and len(parts[0]) < 40:
+        # Есть двоеточие, первая часть – термин
+        term = parts[0].strip()
+        definition = parts[1].strip()
+        formatted = f"*{escape_md(term)}*: {escape_md(definition)}"
+    else:
+        formatted = escape_md(sentence)
+    source_escaped = escape_md(source)
+    return f"{formatted}\n\n📚 *Источник:* {source_escaped}"
 
+# ---------- КЛАВИАТУРА ----------
 kb_buttons = [
     [KeyboardButton(text="📈 Что такое спред?"), KeyboardButton(text="⚖️ Правило 1%")],
     [KeyboardButton(text="📊 Торговые стратегии"), KeyboardButton(text="🛡️ Как управлять рисками?")],
@@ -69,6 +95,12 @@ start_keyboard = ReplyKeyboardMarkup(keyboard=kb_buttons, resize_keyboard=True)
 COHERE_URL = "https://api.cohere.ai/v1/embed"
 
 async def get_embedding(text: str) -> list:
+    # Проверяем кэш
+    cached = get_cached_embedding(text)
+    if cached is not None:
+        logging.debug(f"Cache hit for: {text[:30]}...")
+        return cached
+    logging.debug(f"Cache miss for: {text[:30]}...")
     headers = {
         "Authorization": f"Bearer {COHERE_API_KEY}",
         "Content-Type": "application/json"
@@ -84,15 +116,31 @@ async def get_embedding(text: str) -> list:
                 error_text = await resp.text()
                 raise Exception(f"Cohere API error: {resp.status} - {error_text}")
             data = await resp.json()
-            return data["embeddings"][0]
+            embedding = data["embeddings"][0]
+            set_cached_embedding(text, embedding)
+            return embedding
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    await message.answer(
-        "🤖 Привет! Я бот-помощник по трейдингу Forex.\n"
-        "Задайте вопрос в свободной форме или выберите один из вариантов ниже:",
-        reply_markup=start_keyboard
+    # Красивое приветствие с эмодзи, используем MarkdownV2, но экранируем отдельные символы
+    greeting = (
+        "🤖 *Добро пожаловать в Forex Assistant\\!*\n\n"
+        "Я — бот, который помогает разбираться в трейдинге на валютном рынке\\. "
+        "Мои знания основаны на проверенных источниках, и я ищу точные ответы на ваши вопросы\\.\n\n"
+        "✨ *Что я умею:*\n"
+        "• Отвечать на вопросы по трейдингу простым языком\n"
+        "• Находить определения терминов, стратегии, психологию торговли\n"
+        "• Давать ссылку на источник знаний\n\n"
+        "💬 *Как спросить?*\n"
+        "Просто напишите вопрос или выберите один из вариантов ниже\\.\n\n"
+        "📌 *Примеры:*\n"
+        "`Что такое пипс?`\n"
+        "`Как управлять рисками?`\n"
+        "`Какие бывают торговые сессии?`"
     )
+    # В MarkdownV2 нужно экранировать '.', '!', '?', но мы уже экранировали вручную.
+    # Используем parse_mode="MarkdownV2"
+    await message.answer(greeting, parse_mode="MarkdownV2", reply_markup=start_keyboard)
 
 @dp.message()
 async def handle_message(message: types.Message):
@@ -125,8 +173,8 @@ async def handle_message(message: types.Message):
         await conn.close()
 
         if not rows:
-            answer = "По вашему вопросу ничего не найдено. Попробуйте переформулировать."
-            await message.answer(answer)
+            answer = "❌ *Не найдено.* Попробуйте переформулировать вопрос или спросить о другом термине."
+            await message.answer(answer, parse_mode="MarkdownV2")
             await db.log_query(message.from_user.id, message.from_user.username, query, answer)
             return
 
@@ -134,28 +182,26 @@ async def handle_message(message: types.Message):
         chunk_text = rows[0]["chunk_text"]
         source = rows[0]["source"]
 
-        # Разбиваем чанк на предложения и выбираем лучшее
+        # Разбиваем на предложения и выбираем лучшее
         sentences = split_sentences(chunk_text)
         best_sentence, score = get_best_sentence(query, sentences)
 
-        # Если лучшее предложение найдено и оценка > 0 – отвечаем им
         if best_sentence and score > 0:
             final_answer = best_sentence
         else:
-            # Если по какой-то причине не вычленили, возвращаем весь чанк (но обрезаем до 500 символов)
+            # fallback – весь чанк, но коротко
             final_answer = chunk_text[:500]
 
-        # Экранируем Markdown
-        answer_text = escape_md(final_answer)
-        source_escaped = escape_md(source)
-        await message.answer(f"{answer_text}\n\n📚 *Источник:* {source_escaped}", parse_mode="MarkdownV2")
+        # Форматируем ответ
+        formatted = format_answer(final_answer, source)
+        await message.answer(formatted, parse_mode="MarkdownV2")
 
         # Логируем
         await db.log_query(message.from_user.id, message.from_user.username, query, final_answer)
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
-        await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
+        await message.answer("⚠️ *Произошла внутренняя ошибка.* Попробуйте позже.", parse_mode="MarkdownV2")
         await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
 # --- Вебхук ---
