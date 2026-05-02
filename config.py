@@ -6,7 +6,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")   # <-- добавлено
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")   # новый ключ
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "deepseek/deepseek-r1:free"
