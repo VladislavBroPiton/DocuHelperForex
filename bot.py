@@ -64,27 +64,20 @@ async def handle_message(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         query_embedding = await get_embedding(query)
-        query_emb_str = str(query_embedding)  # строка вида "[0.1, 0.2, ...]"
-
-        word_count = len(query.split())
-        # Убеждаемся, что порог - число с плавающей точкой
-        if word_count <= 2:
-            threshold = 0.35
-        else:
-            threshold = float(SIMILARITY_THRESHOLD)
+        query_emb_str = str(query_embedding)
 
         conn = await asyncpg.connect(DATABASE_URL)
-
+        # Основной запрос с приведением типа для порога
         rows = await conn.fetch("""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
             FROM documents_chunks
-            WHERE 1 - (embedding <=> $1::vector) > $2
+            WHERE 1 - (embedding <=> $1::vector) > $2::float
             ORDER BY similarity DESC
             LIMIT $3
-        """, query_emb_str, threshold, TOP_K)
+        """, query_emb_str, SIMILARITY_THRESHOLD, TOP_K)
 
         if not rows:
-            # Повторный поиск с низким порогом
+            # Повторный запрос с низким порогом (литерал, проблем нет)
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
@@ -113,11 +106,9 @@ async def handle_message(message: types.Message):
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
-        error_msg = "Извините, произошла внутренняя ошибка. Попробуйте позже."
-        await message.answer(error_msg)
+        await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
         await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
-# --- Вебхук ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
