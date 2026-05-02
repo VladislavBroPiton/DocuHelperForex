@@ -1,12 +1,19 @@
 import asyncio
-from sentence_transformers import SentenceTransformer
+import aiohttp
 import asyncpg
-from config import DATABASE_URL
+from config import DATABASE_URL, HF_TOKEN  # добавим HF_TOKEN в config
 
-model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+# Бесплатный эндпоинт Hugging Face
+HF_EMBEDDING_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
-async def get_embedding(text: str) -> list:
-    return model.encode(text).tolist()
+async def get_embedding(text: str, headers: dict) -> list:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(HF_EMBEDDING_URL, headers=headers, json={"inputs": text}) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise Exception(f"HF API error: {resp.status} - {error_text}")
+            embedding = await resp.json()
+            return embedding  # уже список чисел
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     words = text.split()
@@ -18,12 +25,10 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     return chunks
 
 async def main():
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     conn = await asyncpg.connect(DATABASE_URL)
-    # Включаем расширение vector (если ещё не включено)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-    # Удаляем старую таблицу, чтобы не было конфликта размерности
     await conn.execute("DROP TABLE IF EXISTS documents_chunks;")
-    # Создаём новую таблицу с векторами размерности 384
     await conn.execute("""
         CREATE TABLE documents_chunks (
             id SERIAL PRIMARY KEY,
@@ -40,7 +45,7 @@ async def main():
     print(f"Найдено {len(chunks)} фрагментов")
 
     for i, chunk in enumerate(chunks):
-        emb = await get_embedding(chunk)
+        emb = await get_embedding(chunk, headers)
         emb_str = str(emb)
         await conn.execute(
             "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2::vector, $3)",
