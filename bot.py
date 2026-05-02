@@ -15,11 +15,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Настройка OpenRouter (бесплатный LLM)
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
 
-# Загружаем ТУ ЖЕ самую локальную модель для эмбеддингов
 embedding_model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
 async def get_embedding(text: str) -> list:
@@ -61,6 +59,8 @@ async def handle_message(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         query_embedding = await get_embedding(query)
+        # Преобразуем список в строку для PostgreSQL
+        query_emb_str = str(query_embedding)
         conn = await asyncpg.connect(DATABASE_URL)
         rows = await conn.fetch("""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
@@ -68,7 +68,7 @@ async def handle_message(message: types.Message):
             WHERE 1 - (embedding <=> $1::vector) > $2
             ORDER BY similarity DESC
             LIMIT $3
-        """, query_embedding, SIMILARITY_THRESHOLD, TOP_K)
+        """, query_emb_str, SIMILARITY_THRESHOLD, TOP_K)
         similar = [(row["chunk_text"], row["source"], row["similarity"]) for row in rows]
         await conn.close()
         if not similar:
