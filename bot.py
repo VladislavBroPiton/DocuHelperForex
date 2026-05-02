@@ -67,23 +67,23 @@ async def handle_message(message: types.Message):
         query_emb_str = str(query_embedding)
 
         conn = await asyncpg.connect(DATABASE_URL)
-        # Основной запрос с приведением типа для порога
-        rows = await conn.fetch("""
+        # Вставляем порог прямо в запрос (без параметра $2)
+        rows = await conn.fetch(f"""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
             FROM documents_chunks
-            WHERE 1 - (embedding <=> $1::vector) > $2::float
+            WHERE 1 - (embedding <=> $1::vector) > {SIMILARITY_THRESHOLD}
             ORDER BY similarity DESC
-            LIMIT $3
-        """, query_emb_str, SIMILARITY_THRESHOLD, TOP_K)
+            LIMIT {TOP_K}
+        """, query_emb_str)
 
         if not rows:
-            # Повторный запрос с низким порогом (литерал, проблем нет)
+            # Повторный поиск с низким порогом
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
                 WHERE 1 - (embedding <=> $1::vector) > 0.3
                 ORDER BY similarity DESC
-                LIMIT $3
+                LIMIT $2
             """, query_emb_str, TOP_K)
 
         await conn.close()
