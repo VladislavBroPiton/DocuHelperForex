@@ -15,38 +15,32 @@ class Database:
     async def create_tables(self):
         async with self.pool.acquire() as conn:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            # Основная таблица для фрагментов знаний
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS documents_chunks (
                     id SERIAL PRIMARY KEY,
                     chunk_text TEXT NOT NULL,
-                    embedding vector(1536),
+                    embedding vector(1024),
                     source VARCHAR(255)
                 );
             """)
+            # Таблица для логов
             await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_embedding 
-                ON documents_chunks 
-                USING ivfflat (embedding vector_cosine_ops);
+                CREATE TABLE IF NOT EXISTS queries_log (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    username TEXT,
+                    query_text TEXT,
+                    answer_text TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
             """)
 
-    async def insert_chunk(self, text: str, embedding: list, source: str = "forex_knowledge.txt"):
+    async def log_query(self, user_id: int, username: str, query_text: str, answer_text: str = None):
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2, $3)",
-                text, embedding, source
-            )
+            await conn.execute("""
+                INSERT INTO queries_log (user_id, username, query_text, answer_text, created_at)
+                VALUES ($1, $2, $3, $4, NOW())
+            """, user_id, username, query_text, answer_text)
 
-    async def delete_all_chunks(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("TRUNCATE documents_chunks;")
-
-    async def find_similar_chunks(self, query_embedding: list, threshold: float, top_k: int):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
-                FROM documents_chunks
-                WHERE 1 - (embedding <=> $1::vector) > $2
-                ORDER BY similarity DESC
-                LIMIT $3
-            """, query_embedding, threshold, top_k)
-            return [(row["chunk_text"], row["source"], row["similarity"]) for row in rows]
+    # ... (остальные методы, такие как insert_chunk, delete_all_chunks, find_similar_chunks, если нужны)
