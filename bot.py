@@ -51,9 +51,8 @@ async def handle_message(message: types.Message):
     try:
         query_embedding = await get_embedding(query)
         query_emb_str = str(query_embedding)
-        word_count = len(query.split())
-        threshold = 0.35 if word_count <= 2 else SIMILARITY_THRESHOLD
 
+        # --- ПОИСК С ОСНОВНЫМ ПОРОГОМ ---
         conn = await asyncpg.connect(DATABASE_URL)
         rows = await conn.fetch("""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
@@ -61,13 +60,15 @@ async def handle_message(message: types.Message):
             WHERE 1 - (embedding <=> $1::vector) > $2
             ORDER BY similarity DESC
             LIMIT $3
-        """, query_emb_str, threshold, TOP_K)
+        """, query_emb_str, SIMILARITY_THRESHOLD, TOP_K)
 
-        if not rows and word_count <= 2:
+        # --- ЕСЛИ НИЧЕГО НЕ НАШЛО, ПРОБУЕМ С НИЗКИМ ПОРОГОМ (0.3) ---
+        if not rows:
+            logging.info(f"Ничего не найдено с порогом {SIMILARITY_THRESHOLD}, пробуем порог 0.3")
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
-                WHERE 1 - (embedding <=> $1::vector) > 0.2
+                WHERE 1 - (embedding <=> $1::vector) > 0.3
                 ORDER BY similarity DESC
                 LIMIT $3
             """, query_emb_str, TOP_K)
@@ -78,7 +79,7 @@ async def handle_message(message: types.Message):
             await message.answer("По вашему вопросу ничего не найдено. Попробуйте переформулировать.")
             return
 
-        # Формируем ответ из найденных фрагментов
+        # --- ФОРМИРОВАНИЕ ОТВЕТА ---
         answer_parts = []
         for i, row in enumerate(rows, 1):
             text = row["chunk_text"]
@@ -86,7 +87,7 @@ async def handle_message(message: types.Message):
             answer_parts.append(f"*Результат {i}:*\n{text}\n📚 *Источник:* {source}")
         answer = "\n\n".join(answer_parts)
 
-        # Экранируем спецсимволы для Telegram MarkdownV2
+        # Экранирование спецсимволов для MarkdownV2
         escape_chars = r'_*[]()~`>#+-=|{}.!'
         answer = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', answer)
         await message.answer(answer, parse_mode="MarkdownV2")
