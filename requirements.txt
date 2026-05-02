@@ -3,3 +3,6 @@ aiohttp==3.9.5
 asyncpg==0.29.0
 openai==1.35.0
 pgvector==0.2.5
+sentence-transformers
+torch
+python-dotenv
