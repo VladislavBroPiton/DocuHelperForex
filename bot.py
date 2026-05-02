@@ -17,21 +17,21 @@ dp = Dispatcher()
 openai.api_key = OPENROUTER_API_KEY
 openai.base_url = OPENROUTER_BASE_URL
 
-HF_EMBEDDING_URL = "https://api.lightweightembeddings.com/v1/embeddings"
-HF_TOKEN = None  # или просто уберите проверку токена
+EMBEDDING_API_URL = "https://api.lightweightembeddings.com/v1/embeddings"
+EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
 async def get_embedding(text: str) -> list:
     async with aiohttp.ClientSession() as session:
         payload = {
-            "model": "paraphrase-multilingual-MiniLM-L12-v2",
+            "model": EMBEDDING_MODEL,
             "input": text
         }
-        async with session.post("https://api.lightweightembeddings.com/v1/embeddings", json=payload) as resp:
+        async with session.post(EMBEDDING_API_URL, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise Exception(f"Embedding API error: {resp.status} - {error_text}")
             data = await resp.json()
-            embedding = data["data"][0]["embedding"]
+            return data["data"][0]["embedding"]
             return embedding
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
