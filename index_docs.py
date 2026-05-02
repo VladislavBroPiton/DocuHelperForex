@@ -1,20 +1,26 @@
 import asyncio
 import aiohttp
 import asyncpg
-from config import DATABASE_URL, HF_TOKEN  # добавим HF_TOKEN в config
+from config import DATABASE_URL
 
-# Бесплатный эндпоинт Hugging Face
-HF_EMBEDDING_URL = "https://api.lightweightembeddings.com/v1/embeddings"
-HF_TOKEN = None  # или просто уберите проверку токена
+# Бесплатный эндпоинт LightweightEmbeddings (без токена)
+EMBEDDING_API_URL = "https://api.lightweightembeddings.com/v1/embeddings"
+EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
-async def get_embedding(text: str, headers: dict) -> list:
+async def get_embedding(text: str) -> list:
     async with aiohttp.ClientSession() as session:
-        async with session.post(HF_EMBEDDING_URL, headers=headers, json={"inputs": text}) as resp:
+        payload = {
+            "model": EMBEDDING_MODEL,
+            "input": text
+        }
+        async with session.post(EMBEDDING_API_URL, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                raise Exception(f"HF API error: {resp.status} - {error_text}")
-            embedding = await resp.json()
-            return embedding  # уже список чисел
+                raise Exception(f"Embedding API error: {resp.status} - {error_text}")
+            data = await resp.json()
+            # Ответ LightweightEmbeddings: {"data": [{"embedding": [...]}]}
+            embedding = data["data"][0]["embedding"]
+            return embedding
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     words = text.split()
@@ -26,7 +32,6 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     return chunks
 
 async def main():
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     await conn.execute("DROP TABLE IF EXISTS documents_chunks;")
@@ -46,7 +51,7 @@ async def main():
     print(f"Найдено {len(chunks)} фрагментов")
 
     for i, chunk in enumerate(chunks):
-        emb = await get_embedding(chunk, headers)
+        emb = await get_embedding(chunk)
         emb_str = str(emb)
         await conn.execute(
             "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2::vector, $3)",
