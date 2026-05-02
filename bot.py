@@ -21,6 +21,44 @@ def escape_md(text: str) -> str:
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
+# -------------- НОВЫЕ ФУНКЦИИ ДЛЯ ВЫДЕЛЕНИЯ ПРЕДЛОЖЕНИЙ --------------
+def split_sentences(text: str) -> list[str]:
+    """Разбивает текст на предложения по . ! ? (учитывает многоточие)"""
+    # Заменяем переносы строк на пробелы
+    text = text.replace('\n', ' ')
+    # Регулярное выражение для разделения
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    # Удаляем пустые и слишком короткие (меньше 10 символов)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    return sentences
+
+def word_set(text: str) -> set:
+    """Возвращает множество слов в нижнем регистре, игнорируя знаки препинания."""
+    words = re.findall(r'\b\w+\b', text.lower())
+    return set(words)
+
+def score_sentence(query: str, sentence: str) -> float:
+    """Оценка схожести предложения с запросом (пересечение слов / длина запроса)"""
+    query_words = word_set(query)
+    sentence_words = word_set(sentence)
+    if not query_words:
+        return 0.0
+    overlap = len(query_words & sentence_words)
+    return overlap / len(query_words)
+
+def get_best_sentence(query: str, sentences: list[str]) -> tuple[str, float]:
+    """Возвращает лучшее предложение и его оценку."""
+    best = ""
+    best_score = 0.0
+    for sent in sentences:
+        score = score_sentence(query, sent)
+        if score > best_score:
+            best_score = score
+            best = sent
+    return best, best_score
+
+# ----------------------------------------------------------------
+
 kb_buttons = [
     [KeyboardButton(text="📈 Что такое спред?"), KeyboardButton(text="⚖️ Правило 1%")],
     [KeyboardButton(text="📊 Торговые стратегии"), KeyboardButton(text="🛡️ Как управлять рисками?")],
@@ -67,7 +105,6 @@ async def handle_message(message: types.Message):
         query_emb_str = str(query_embedding)
 
         conn = await asyncpg.connect(DATABASE_URL)
-        # Вставляем порог прямо в запрос (без параметра $2)
         rows = await conn.fetch(f"""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
             FROM documents_chunks
@@ -77,7 +114,6 @@ async def handle_message(message: types.Message):
         """, query_emb_str)
 
         if not rows:
-            # Повторный поиск с низким порогом
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
                 FROM documents_chunks
@@ -94,21 +130,35 @@ async def handle_message(message: types.Message):
             await db.log_query(message.from_user.id, message.from_user.username, query, answer)
             return
 
-        answer_parts = []
-        for i, row in enumerate(rows, 1):
-            text = escape_md(row["chunk_text"])
-            source = escape_md(row["source"])
-            answer_parts.append(f"*Результат {i}:*\n{text}\n📚 *Источник:* {source}")
-        answer = "\n\n".join(answer_parts)
+        # Берём первый (самый релевантный) чанк
+        chunk_text = rows[0]["chunk_text"]
+        source = rows[0]["source"]
 
-        await message.answer(answer, parse_mode="MarkdownV2")
-        await db.log_query(message.from_user.id, message.from_user.username, query, answer)
+        # Разбиваем чанк на предложения и выбираем лучшее
+        sentences = split_sentences(chunk_text)
+        best_sentence, score = get_best_sentence(query, sentences)
+
+        # Если лучшее предложение найдено и оценка > 0 – отвечаем им
+        if best_sentence and score > 0:
+            final_answer = best_sentence
+        else:
+            # Если по какой-то причине не вычленили, возвращаем весь чанк (но обрезаем до 500 символов)
+            final_answer = chunk_text[:500]
+
+        # Экранируем Markdown
+        answer_text = escape_md(final_answer)
+        source_escaped = escape_md(source)
+        await message.answer(f"{answer_text}\n\n📚 *Источник:* {source_escaped}", parse_mode="MarkdownV2")
+
+        # Логируем
+        await db.log_query(message.from_user.id, message.from_user.username, query, final_answer)
 
     except Exception as e:
         logging.error(f"Ошибка в handle_message: {e}")
         await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
         await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
+# --- Вебхук ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
