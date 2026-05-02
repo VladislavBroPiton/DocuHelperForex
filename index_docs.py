@@ -19,16 +19,19 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
 
 async def main():
     conn = await asyncpg.connect(DATABASE_URL)
+    # Включаем расширение vector (если ещё не включено)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    # Удаляем старую таблицу, чтобы не было конфликта размерности
+    await conn.execute("DROP TABLE IF EXISTS documents_chunks;")
+    # Создаём новую таблицу с векторами размерности 384
     await conn.execute("""
-        CREATE TABLE IF NOT EXISTS documents_chunks (
+        CREATE TABLE documents_chunks (
             id SERIAL PRIMARY KEY,
             chunk_text TEXT NOT NULL,
             embedding vector(384),
             source VARCHAR(255)
         );
     """)
-    await conn.execute("TRUNCATE documents_chunks;")
 
     with open("forex_knowledge.txt", "r", encoding="utf-8") as f:
         full_text = f.read()
@@ -38,7 +41,6 @@ async def main():
 
     for i, chunk in enumerate(chunks):
         emb = await get_embedding(chunk)
-        # Превращаем список в строку для PostgreSQL
         emb_str = str(emb)
         await conn.execute(
             "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2::vector, $3)",
