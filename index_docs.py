@@ -1,26 +1,14 @@
 import asyncio
-import aiohttp
-import openai
-from config import OPENAI_API_KEY, OPENAI_BASE_URL, DATABASE_URL
-from database import Database
+from sentence_transformers import SentenceTransformer
+import asyncpg
+from config import DATABASE_URL
 
-# Настраиваем OpenAI-клиент для работы через OpenRouter (для генерации ответов не нужен в этом скрипте)
-# Но для эмбеддингов мы будем использовать другой сервис.
-
-# Бесплатный эмбеддинг-сервис без ключа
-EMBEDDING_API_URL = "https://api.lightweightembeddings.com/v1/embeddings"
-EMBEDDING_MODEL = "paraphrase-MiniLM-L3-v2"  # подходящая бесплатная модель
+# Загружаем бесплатную локальную модель (она скачается один раз, ~120 МБ)
+model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
 async def get_embedding(text: str) -> list:
-    async with aiohttp.ClientSession() as session:
-        payload = {
-            "model": EMBEDDING_MODEL,
-            "input": text
-        }
-        async with session.post(EMBEDDING_API_URL, json=payload) as resp:
-            data = await resp.json()
-            # data.data[0].embedding
-            return data["data"][0]["embedding"]
+    # Модель возвращает вектор (список чисел)
+    return model.encode(text).tolist()
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     words = text.split()
@@ -32,10 +20,20 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     return chunks
 
 async def main():
-    db = Database()
-    await db.connect()
-    await db.create_tables()
-    await db.delete_all_chunks()
+    conn = await asyncpg.connect(DATABASE_URL)
+    # Включаем расширение vector (если ещё не включено)
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    # Создаём таблицу, если её нет (размерность вектора 384)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS documents_chunks (
+            id SERIAL PRIMARY KEY,
+            chunk_text TEXT NOT NULL,
+            embedding vector(384),
+            source VARCHAR(255)
+        );
+    """)
+    # Очищаем старые данные
+    await conn.execute("TRUNCATE documents_chunks;")
 
     with open("forex_knowledge.txt", "r", encoding="utf-8") as f:
         full_text = f.read()
@@ -45,10 +43,13 @@ async def main():
 
     for i, chunk in enumerate(chunks):
         emb = await get_embedding(chunk)
-        await db.insert_chunk(chunk, emb, source="forex_knowledge.txt")
+        await conn.execute(
+            "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2, $3)",
+            chunk, emb, "forex_knowledge.txt"
+        )
         print(f"Загружен {i+1}/{len(chunks)}")
 
-    await db.close()
+    await conn.close()
     print("Готово!")
 
 if __name__ == "__main__":
