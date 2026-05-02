@@ -2,13 +2,13 @@ import asyncio
 import aiohttp
 import asyncpg
 import os
-from config import DATABASE_URL, COHERE_API_KEY
+from config import DATABASE_URL
 
 COHERE_URL = "https://api.cohere.ai/v1/embed"
 
-async def get_embedding(text: str) -> list:
+async def get_embedding(text: str, api_key: str) -> list:
     headers = {
-        "Authorization": f"Bearer {COHERE_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     payload = {
@@ -22,7 +22,6 @@ async def get_embedding(text: str) -> list:
                 error_text = await resp.text()
                 raise Exception(f"Cohere API error: {resp.status} - {error_text}")
             data = await resp.json()
-            # Возвращает список из одного вектора
             return data["embeddings"][0]
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
@@ -35,8 +34,10 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50):
     return chunks
 
 async def main():
-    if not COHERE_API_KEY:
+    api_key = os.getenv("COHERE_API_KEY")
+    if not api_key:
         raise Exception("COHERE_API_KEY не задан")
+    
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     await conn.execute("DROP TABLE IF EXISTS documents_chunks;")
@@ -56,7 +57,7 @@ async def main():
     print(f"Найдено {len(chunks)} фрагментов")
 
     for i, chunk in enumerate(chunks):
-        emb = await get_embedding(chunk)
+        emb = await get_embedding(chunk, api_key)
         emb_str = str(emb)
         await conn.execute(
             "INSERT INTO documents_chunks (chunk_text, embedding, source) VALUES ($1, $2::vector, $3)",
