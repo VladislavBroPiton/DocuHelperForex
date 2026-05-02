@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from aiohttp import web
 import aiohttp
 from aiogram import Bot, Dispatcher, types
@@ -13,9 +14,15 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --- ВАЖНО: Указываем работающую бесплатную модель ---
+# Используем модель из config, если она прописана, или подставляем запасную
+LLM_MODEL = OPENROUTER_MODEL if OPENROUTER_MODEL else "google/gemini-2.0-flash-exp:free"
+logging.info(f"Using LLM model: {LLM_MODEL}")
+
 COHERE_URL = "https://api.cohere.ai/v1/embed"
 
 async def get_embedding(text: str) -> list:
+    """Получает эмбеддинг от Cohere."""
     headers = {
         "Authorization": f"Bearer {COHERE_API_KEY}",
         "Content-Type": "application/json"
@@ -34,27 +41,29 @@ async def get_embedding(text: str) -> list:
             data = await resp.json()
             return data["embeddings"][0]
 
+
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
+    """Генерация ответа через OpenRouter с запасным вариантом."""
     if not context_chunks:
         return "Извините, я не нашёл информацию по вашему вопросу."
-    
+
     context = "\n\n---\n\n".join([chunk[0] for chunk in context_chunks])
     messages = [
         {"role": "system", "content": "Ты — эксперт по трейдингу Forex. Отвечай, используя только контекст. Если ответа нет в контексте, скажи: 'Не знаю, в документации нет'."},
         {"role": "user", "content": f"Контекст:\n{context}\n\nВопрос: {query}"}
     ]
-    
+
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
         "max_tokens": 500
     }
-    
+
     try:
         async with aiohttp.ClientSession() as session:
             url = f"{OPENROUTER_BASE_URL}/chat/completions"
@@ -66,15 +75,22 @@ async def ask_llm_with_context(query: str, context_chunks: list) -> str:
                 data = await resp.json()
                 answer = data["choices"][0]["message"]["content"].strip()
                 source = context_chunks[0][1]
-                return f"{answer}\n\n📚 *Источник:* {source}"
+
+                # --- УНИВЕРСАЛЬНОЕ ЭКРАНИРОВАНИЕ ДЛЯ MarkdownV2 ---
+                escape_chars = r'_*[]()~`>#+-=|{}.!'
+                answer_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', answer)
+                source_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', source)
+
+                return f"{answer_escaped}\n\n📚 *Источник:* {source_escaped}"
+
     except Exception as e:
         logging.error(f"LLM error: {e}")
-        # Fallback: отдаём первый найденный чанк
+        # ЗАПАСНОЙ ВАРИАНТ: возвращаем найденный фрагмент текста
         fallback_text = context_chunks[0][0][:600]
-        # Экранируем спецсимволы для MarkdownV2
-        fallback_escaped = fallback_text.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[')
-        source_escaped = context_chunks[0][1].replace('_', r'\_').replace('*', r'\*')
+        fallback_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', fallback_text)
+        source_escaped = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', context_chunks[0][1])
         return f"🔍 *Найдено в базе знаний:*\n\n{fallback_escaped}\n\n📚 *Источник:* {source_escaped}"
+
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -83,12 +99,14 @@ async def start_cmd(message: types.Message):
         "Примеры: «Что такое спред?», «Управление рисками», «пипс»"
     )
 
+
 @dp.message()
 async def handle_message(message: types.Message):
     query = message.text.strip()
     if not query:
         return
     await bot.send_chat_action(message.chat.id, "typing")
+
     try:
         query_embedding = await get_embedding(query)
         query_emb_str = str(query_embedding)
@@ -128,17 +146,20 @@ async def handle_message(message: types.Message):
         logging.error(f"Ошибка в handle_message: {e}")
         await message.answer("Извините, произошла внутренняя ошибка. Попробуйте позже.")
 
-# --- Вебхук ---
+
+# --- Вебхук (без изменений) ---
 async def webhook_handler(request):
     update = await request.json()
     await dp.feed_update(bot, types.Update(**update))
     return web.Response()
+
 
 async def on_startup():
     await bot.delete_webhook(drop_pending_updates=True)
     webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/webhook"
     await bot.set_webhook(webhook_url)
     logging.info(f"Webhook set to {webhook_url}")
+
 
 async def main():
     app = web.Application()
@@ -151,6 +172,7 @@ async def main():
     await site.start()
     await on_startup()
     await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
