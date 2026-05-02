@@ -27,6 +27,9 @@ async def get_embedding(text: str) -> list:
                 error_text = await resp.text()
                 raise Exception(f"HF API error: {resp.status} - {error_text}")
             embedding = await resp.json()
+            # Ответ HF — список списков [[...]]? Проверим, обычно возвращает list
+            if isinstance(embedding, list) and len(embedding) == 1 and isinstance(embedding[0], list):
+                return embedding[0]  # извлекаем вектор
             return embedding
 
 async def ask_llm_with_context(query: str, context_chunks: list) -> str:
