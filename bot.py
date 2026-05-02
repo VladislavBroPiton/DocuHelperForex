@@ -6,9 +6,8 @@ from aiohttp import web
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import asyncpg
-from functools import lru_cache
 from config import BOT_TOKEN, SIMILARITY_THRESHOLD, TOP_K, DATABASE_URL, COHERE_API_KEY, ADMIN_ID
 from database import Database
 
@@ -18,23 +17,21 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
-# ------------------- ФУНКЦИИ ЭКРАНИРОВАНИЯ -------------------
+# ------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ -------------------
 def escape_md(text: str) -> str:
-    """Экранирует специальные символы для MarkdownV2."""
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# ------------------- КЭШИРОВАНИЕ ЭМБЕДДИНГОВ -------------------
-embedding_cache = {}  # {query: embedding_str}
+# ------------------- КЭШ ЭМБЕДДИНГОВ -------------------
+embedding_cache = {}
 
 async def get_embedding_cached(text: str) -> str:
     if text in embedding_cache:
-        logging.info(f"Cache hit for: {text[:30]}...")
+        logging.info(f"Cache hit: {text[:30]}...")
         return embedding_cache[text]
-    logging.info(f"Cache miss for: {text[:30]}...")
+    logging.info(f"Cache miss: {text[:30]}...")
     embedding = await get_embedding_raw(text)
     embedding_str = str(embedding)
-    # Простое ограничение размера кэша
     if len(embedding_cache) > 200:
         first_key = next(iter(embedding_cache))
         del embedding_cache[first_key]
@@ -55,8 +52,7 @@ async def get_embedding_raw(text: str) -> list:
         async with session.post("https://api.cohere.ai/v1/embed", headers=headers, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                logging.error(f"Cohere API error: {resp.status} - {error_text}")
-                raise Exception(f"Cohere API error: {resp.status}")
+                raise Exception(f"Cohere API error: {resp.status} - {error_text}")
             data = await resp.json()
             return data["embeddings"][0]
 
@@ -64,29 +60,26 @@ async def get_embedding_raw(text: str) -> list:
 def split_sentences(text: str) -> list[str]:
     text = text.replace('\n', ' ')
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-    return sentences
+    return [s.strip() for s in sentences if len(s.strip()) > 10]
 
 def word_set(text: str) -> set:
-    words = re.findall(r'\b\w+\b', text.lower())
-    return set(words)
+    return set(re.findall(r'\b\w+\b', text.lower()))
 
 def score_sentence(query: str, sentence: str) -> float:
-    query_words = word_set(query)
-    sentence_words = word_set(sentence)
-    if not query_words:
+    qw = word_set(query)
+    sw = word_set(sentence)
+    if not qw:
         return 0.0
-    overlap = len(query_words & sentence_words)
-    return overlap / len(query_words)
+    return len(qw & sw) / len(qw)
 
 def get_best_sentence(query: str, sentences: list[str]) -> tuple[str, float]:
     best = ""
     best_score = 0.0
-    for sent in sentences:
-        score = score_sentence(query, sent)
-        if score > best_score:
-            best_score = score
-            best = sent
+    for s in sentences:
+        sc = score_sentence(query, s)
+        if sc > best_score:
+            best_score = sc
+            best = s
     return best, best_score
 
 # ------------------- КЛАВИАТУРА -------------------
@@ -97,30 +90,10 @@ kb_buttons = [
 ]
 start_keyboard = ReplyKeyboardMarkup(keyboard=kb_buttons, resize_keyboard=True)
 
-# ------------------- КОМАНДА /STATS (только для админа) -------------------
-@dp.message(Command("stats"))
-async def stats_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет доступа к этой команде.")
-        return
-    stats = await db.get_stats()
-    top_queries_text = "\n".join([f"{i+1}. `{q[:50]}` ({c})" for i, (q, c) in enumerate(stats["top_queries"])])
-    report = (
-        f"📊 *Статистика бота*\n\n"
-        f"• Всего вопросов: {stats['total_queries']}\n"
-        f"• За сегодня: {stats['today_queries']}\n"
-        f"• За 7 дней: {stats['week_queries']}\n"
-        f"• Уникальных пользователей: {stats['unique_users']}\n"
-        f"• 👍 Полезно: {stats['positive_feedback']}\n"
-        f"• 👎 Не полезно: {stats['negative_feedback']}\n\n"
-        f"*Топ‑5 запросов:*\n{top_queries_text}"
-    )
-    await message.answer(escape_md(report), parse_mode="MarkdownV2")
-
-# ------------------- ОСНОВНОЙ ОБРАБОТЧИК -------------------
+# ------------------- ОБРАБОТЧИК КОМАНД -------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    welcome_text = (
+    welcome = (
         "*🤖 Привет, трейдер\\!*\n\n"
         "Я *DocuHelper Forex* — твой интеллектуальный помощник по трейдингу\\.\n"
         "Я обучен на десятках статей и книг, чтобы отвечать на вопросы о:\n"
@@ -129,8 +102,36 @@ async def start_cmd(message: types.Message):
         "• торговых стратегиях и индикаторах\n\n"
         "Просто напиши свой вопрос в свободной форме или выбери один из вариантов ниже 👇"
     )
-    await message.answer(welcome_text, parse_mode="MarkdownV2", reply_markup=start_keyboard)
+    await message.answer(welcome, parse_mode="MarkdownV2", reply_markup=start_keyboard)
 
+@dp.message(Command("stats"))
+async def stats_cmd(message: types.Message):
+    # Проверка, что пользователь - админ
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+    try:
+        stats = await db.get_stats()
+        text = (
+            f"*📊 Статистика бота*\n\n"
+            f"*Всего вопросов:* {stats['total_queries']}\n"
+            f"*За сегодня:* {stats['today_queries']}\n"
+            f"*За 7 дней:* {stats['week_queries']}\n"
+            f"*Уникальных пользователей:* {stats['unique_users']}\n\n"
+            f"*Топ-5 запросов:*\n"
+        )
+        for i, (q, cnt) in enumerate(stats['top_queries'], 1):
+            text += f"{i}. `{escape_md(q)}` — {cnt}\n"
+        text += f"\n*Обратная связь:*\n"
+        text += f"👍 Полезно: {stats['positive']}\n"
+        text += f"👎 Не полезно: {stats['negative']}\n"
+        text += f"*Процент полезного:* {stats['positive_rate']}%\n"
+        await message.answer(text, parse_mode="MarkdownV2")
+    except Exception as e:
+        logging.error(f"Stats error: {e}")
+        await message.answer("Ошибка получения статистики.")
+
+# ------------------- ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ -------------------
 @dp.message()
 async def handle_message(message: types.Message):
     query = message.text.strip()
@@ -139,7 +140,6 @@ async def handle_message(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         query_emb_str = await get_embedding_cached(query)
-
         conn = await asyncpg.connect(DATABASE_URL)
         rows = await conn.fetch(f"""
             SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
@@ -148,7 +148,6 @@ async def handle_message(message: types.Message):
             ORDER BY similarity DESC
             LIMIT {TOP_K}
         """, query_emb_str)
-
         if not rows:
             rows = await conn.fetch("""
                 SELECT chunk_text, source, 1 - (embedding <=> $1::vector) AS similarity
@@ -157,20 +156,19 @@ async def handle_message(message: types.Message):
                 ORDER BY similarity DESC
                 LIMIT $2
             """, query_emb_str, TOP_K)
-
         await conn.close()
 
         if not rows:
-            answer_text = "🤔 *Не нашёл информации.* Попробуй переформулировать вопрос или спросить что-то другое."
+            answer_text = "🤔 *Не нашёл информацию.* Попробуй переформулировать вопрос или спроси что-то другое."
             await message.answer(escape_md(answer_text), parse_mode="MarkdownV2")
-            await db.log_query(message.from_user.id, message.from_user.username, query, answer_text)
+            await db.log_query(message.from_user.id, message.from_user.username, query, "Не найдено")
             return
 
+        # Выделяем лучшее предложение из первого чанка
         chunk_text = rows[0]["chunk_text"]
         source = rows[0]["source"]
         sentences = split_sentences(chunk_text)
         best_sentence, score = get_best_sentence(query, sentences)
-
         if best_sentence and score > 0.3:
             final_answer = best_sentence
         else:
@@ -181,15 +179,15 @@ async def handle_message(message: types.Message):
         footer = f"\n\n📚 *Источник:* `{source}`"
         full_message = header + escape_md(final_answer) + footer
 
-        # Кнопки обратной связи
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        # Клавиатура для оценки
+        inline_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="👍 Полезно", callback_data=f"like:{query}"),
-                InlineKeyboardButton(text="👎 Не полезно", callback_data=f"dislike:{query}")
+                InlineKeyboardButton(text="👍 Полезно", callback_data=f"like_{query[:50]}"),
+                InlineKeyboardButton(text="👎 Не полезно", callback_data=f"dislike_{query[:50]}")
             ]
         ])
+        await message.answer(full_message, parse_mode="MarkdownV2", reply_markup=inline_kb)
 
-        await message.answer(full_message, parse_mode="MarkdownV2", reply_markup=keyboard)
         await db.log_query(message.from_user.id, message.from_user.username, query, final_answer)
 
     except Exception as e:
@@ -197,24 +195,24 @@ async def handle_message(message: types.Message):
         await message.answer("⚠️ *Извините, произошла внутренняя ошибка.* Попробуйте позже.", parse_mode="MarkdownV2")
         await db.log_query(message.from_user.id, message.from_user.username, query, f"ERROR: {e}")
 
-# ------------------- ОБРАБОТЧИК ОБРАТНОЙ СВЯЗИ -------------------
+# ------------------- ОБРАБОТЧИК КНОПОК ОБРАТНОЙ СВЯЗИ -------------------
 @dp.callback_query()
-async def handle_feedback(callback: types.CallbackQuery):
+async def handle_feedback(callback: CallbackQuery):
     data = callback.data
-    if data.startswith("like:"):
+    if data.startswith("like_"):
         rating = 1
-        query = data[5:]
-    elif data.startswith("dislike:"):
+        query_text = data[5:]  # обрезаем префикс
+    elif data.startswith("dislike_"):
         rating = 0
-        query = data[8:]
+        query_text = data[8:]
     else:
-        await callback.answer("Неизвестная команда")
+        await callback.answer("Неизвестное действие")
         return
 
-    # Сохраняем обратную связь в БД (можно также сохранить ответ, но у нас нет под рукой, оставим так)
-    await db.save_feedback(callback.from_user.id, query, "", rating)
-    await callback.answer("Спасибо за обратную связь!")
-    await callback.message.edit_reply_markup(reply_markup=None)  # убираем кнопки
+    await db.save_feedback(callback.from_user.id, query_text, rating)
+    await callback.answer("Спасибо за оценку!")
+    # Убираем кнопки, чтобы нельзя было оценить повторно
+    await callback.message.edit_reply_markup(reply_markup=None)
 
 # ------------------- ВЕБХУК -------------------
 async def webhook_handler(request):
