@@ -171,8 +171,7 @@ async def handle_message(message: types.Message):
             final_answer = chunk_text[:300] + ("..." if len(chunk_text) > 300 else "")
 
         header = f"*📘 Ответ на ваш запрос:*\n"
-        footer = f"\n\n📚 *Источник:* `{source}`"
-        full_message = header + escape_md(final_answer) + footer
+        full_message = header + escape_md(final_answer)
 
         # Inline-кнопки обратной связи (без текста вопроса в data)
         inline_kb = InlineKeyboardMarkup(inline_keyboard=[
